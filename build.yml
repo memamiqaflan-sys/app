@@ -1,0 +1,85 @@
+name: Build iPhone IPA
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate project or extract uploaded ZIP
+        shell: bash
+        run: |
+          if [[ -d HighSpeedRecorder.xcodeproj ]]; then
+            echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          else
+            python3 - <<'PY'
+          import os, zipfile
+          from pathlib import Path
+          archive = Path('HighSpeedRecorder_iPhone13Pro.zip')
+          if not archive.is_file():
+              raise SystemExit('Upload HighSpeedRecorder_iPhone13Pro.zip to the repository root first.')
+          root = Path('source').resolve()
+          root.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive) as z:
+              for item in z.infolist():
+                  target = (root / item.filename).resolve()
+                  if not target.is_relative_to(root):
+                      raise SystemExit('Invalid archive path')
+              z.extractall(root)
+          projects = list(root.rglob('HighSpeedRecorder.xcodeproj'))
+          if len(projects) != 1:
+              raise SystemExit('Expected exactly one HighSpeedRecorder.xcodeproj')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write('PROJECT_DIR=' + str(projects[0].parent) + '\n')
+          PY
+          fi
+      - name: Validate data-checking tools
+        shell: bash
+        run: python3 -m unittest discover -s "$PROJECT_DIR/tests" -v
+      - name: Build unsigned physical-iPhone app
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -version
+          xcodebuild -project "$PROJECT_DIR/HighSpeedRecorder.xcodeproj" -scheme HighSpeedRecorder -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$GITHUB_WORKSPACE/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+      - name: Package unsigned IPA for Windows signing
+        shell: bash
+        run: |
+          mkdir -p package/Payload
+          ditto build/Build/Products/Release-iphoneos/HighSpeedRecorder.app package/Payload/HighSpeedRecorder.app
+          python3 - <<'PY'
+          import plistlib, subprocess
+          from pathlib import Path
+          app = Path('package/Payload/HighSpeedRecorder.app')
+          info = plistlib.loads((app / 'Info.plist').read_bytes())
+          if 'iPhoneOS' not in info.get('CFBundleSupportedPlatforms', []):
+              raise SystemExit('Wrong platform: need physical iPhone, not simulator')
+          binary = app / info['CFBundleExecutable']
+          architectures = subprocess.check_output(['lipo', '-archs', str(binary)], text=True).split()
+          if 'arm64' not in architectures:
+              raise SystemExit('Missing arm64 executable')
+          print('Checked iPhoneOS platform and arm64 executable.')
+          PY
+          cd package
+          ditto -c -k --keepParent Payload HighSpeedRecorder.ipa
+          shasum -a 256 HighSpeedRecorder.ipa > SHA256.txt
+      - name: Downloadable IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HighSpeedRecorder-iPhone-IPA
+          path: |
+            package/HighSpeedRecorder.ipa
+            package/SHA256.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
