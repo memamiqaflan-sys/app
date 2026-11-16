@@ -142,6 +142,7 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
         mode = requested
     }
     func start(lockCamera: Bool, imuHz: Double, durationSeconds: Double? = nil) {
+        guard UIApplication.shared.applicationState == .active else { return }
         q.async {
             guard self.configured, self.session.isRunning, !self.active, !self.finishing else { return }
             self.requestedIMUHz = imuHz
@@ -378,8 +379,7 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
     // Call from main when the app enters the background. This requests time to
     // finish the MOV; it does not enable background camera capture.
     func backgrounded() {
-        guard busy else { return }
-        if backgroundTask == .invalid {
+        if busy && backgroundTask == .invalid {
             backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Finalize dataset") { [weak self] in
                 guard let self = self else { return }
                 if self.backgroundTask != .invalid {
@@ -388,6 +388,8 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
                 }
             }
         }
+        // Always enqueue Stop, including when Start is queued but the main UI
+        // has not yet received its asynchronous busy publication.
         stop(reason: "app entered background")
     }
     private func publishRates() {
