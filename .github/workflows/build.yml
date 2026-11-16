@@ -1,41 +1,25 @@
 name: Build iPhone IPA
 on:
   workflow_dispatch:
+  push:
+    branches: ['main', 'codex/recorder-build-repair']
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Locate project or extract uploaded ZIP
-        shell: bash
+      - name: Use tracked source
+        run: echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - name: Test timestamp statistics
         run: |
-          if [[ -d HighSpeedRecorder.xcodeproj ]]; then
-            echo "PROJECT_DIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-          else
-            python3 - <<'PY'
-          import os, zipfile
-          from pathlib import Path
-          archive = Path('HighSpeedRecorder_iPhone13Pro.zip')
-          if not archive.is_file():
-              raise SystemExit('Upload HighSpeedRecorder_iPhone13Pro.zip to the repository root first.')
-          root = Path('source').resolve()
-          root.mkdir(exist_ok=True)
-          with zipfile.ZipFile(archive) as z:
-              for item in z.infolist():
-                  target = (root / item.filename).resolve()
-                  if not target.is_relative_to(root):
-                      raise SystemExit('Invalid archive path')
-              z.extractall(root)
-          projects = list(root.rglob('HighSpeedRecorder.xcodeproj'))
-          if len(projects) != 1:
-              raise SystemExit('Expected exactly one HighSpeedRecorder.xcodeproj')
-          with open(os.environ['GITHUB_ENV'], 'a') as f:
-              f.write('PROJECT_DIR=' + str(projects[0].parent) + '\n')
-          PY
-          fi
+          swiftc -parse-as-library HighSpeedRecorder/CaptureMode.swift tests/StatsTests.swift -o "$RUNNER_TEMP/stats-tests"
+          "$RUNNER_TEMP/stats-tests"
       - name: Validate data-checking tools
         shell: bash
         run: python3 -m unittest discover -s "$PROJECT_DIR/tests" -v
