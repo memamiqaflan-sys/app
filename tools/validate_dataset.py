@@ -5,6 +5,7 @@ import csv
 import json
 import math
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -45,6 +46,19 @@ def validate(folder, decode=False):
     m = json.loads((folder / 'manifest.json').read_text())
     if m.get('status') != 'finalized' or m.get('log_errors'):
         raise ValueError(f'Incomplete recording: status={m.get("status")}, errors={m.get("log_errors")}')
+    if m.get('schema_version', 2) >= 3:
+        if m.get('completion_clean') is not True:
+            raise ValueError('Incomplete dataset: completion_clean is not true')
+        for name in ['frames', 'accelerometer', 'gyroscope', 'drops', 'errors', 'intrinsics', 'telemetry']:
+            path = folder / (name + '.csv')
+            if not path.is_file() or not path.stat().st_size:
+                raise ValueError(f'Missing or empty {name}.csv')
+        for name in ['frames', 'accelerometer', 'gyroscope']:
+            with (folder / (name + '.csv')).open(newline='') as file:
+                for index, row in enumerate(csv.DictReader(file)):
+                    arrival = float(row['callback_host_s'])
+                    if not math.isfinite(arrival):
+                        raise ValueError(f'{name}: nonfinite callback timestamp at row {index}')
     video = folder / 'video.mov'
     if not video.is_file() or video.stat().st_size == 0:
         raise ValueError('Missing or empty video.mov')
@@ -56,15 +70,19 @@ def validate(folder, decode=False):
     for name, field in [('video', 'frames_appended'), ('accelerometer', 'accelerometer_samples'), ('gyroscope', 'gyroscope_samples')]:
         if results[name]['count'] != m[field]:
             raise ValueError(f'{name}: manifest/CSV count mismatch')
-    origin = m['first_video_pts_value'] / m['first_video_pts_timescale']
+    def rational(value, scale):
+        if int(scale) <= 0:
+            raise ValueError('Invalid video PTS timescale')
+        return Fraction(int(value), int(scale))
+    origin = rational(m['first_video_pts_value'], m['first_video_pts_timescale'])
     previous_pts = None
     with (folder / 'frames.csv').open(newline='') as file:
         for index, row in enumerate(csv.DictReader(file)):
             if int(row['index']) != index:
                 raise ValueError('Nonconsecutive frame indices')
-            pts = int(row['pts_value']) / int(row['pts_timescale'])
+            pts = rational(row['pts_value'], row['pts_timescale'])
             relative = float(row['video_s'])
-            if not math.isfinite(relative) or abs(pts - origin - relative) > 1e-6:
+            if pts < origin or not math.isfinite(relative) or abs(float(pts - origin) - relative) > 1e-6:
                 raise ValueError('Relative video PTS mismatch')
             if previous_pts is not None and pts <= previous_pts:
                 raise ValueError('Nonmonotonic source video PTS')
@@ -86,6 +104,9 @@ def validate(folder, decode=False):
             warnings.append(f'{name}: timestamp gaps detected; inspect before analysis.')
     if drops:
         warnings.append(f'{drops} video drops logged.')
+    for name in ['accelerometer', 'gyroscope']:
+        if abs(results[name]['measured_hz'] / m['imu_hz_requested'] - 1) > .05:
+            warnings.append(f'{name}: measured rate differs from requested; API request is not a delivered-rate guarantee.')
     if decode:
         command = ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-count_frames',
                    '-show_entries', 'stream=nb_read_frames,width,height,codec_name', '-of', 'json', str(video)]

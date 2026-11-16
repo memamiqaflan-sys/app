@@ -2,9 +2,7 @@ name: Build iPhone IPA
 on:
   workflow_dispatch:
   push:
-    branches: ['codex/recorder-build-repair']
-  pull_request:
-    branches: [main]
+    branches: ['main', 'codex/recorder-build-repair']
 concurrency:
   group: ios-${{ github.ref }}
   cancel-in-progress: false

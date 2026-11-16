@@ -58,5 +58,50 @@ class ValidationTests(unittest.TestCase):
     def test_dropped_frame_count_mismatch(self):
         self.manifest['drops']=1;self.save_manifest()
         with self.assertRaisesRegex(ValueError,'Drop count'):validator.validate(self.folder)
+    def test_zero_timescale(self):
+        p = self.folder/'frames.csv'
+        p.write_text(p.read_text().replace('0,24000,240,', '0,24000,0,'))
+        with self.assertRaisesRegex(ValueError, 'timescale'): validator.validate(self.folder)
+    def test_negative_timescale(self):
+        self.manifest['first_video_pts_timescale'] = -240; self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'timescale'): validator.validate(self.folder)
+    def test_sensor_gap_reported(self):
+        p = self.folder/'gyroscope.csv'
+        lines = p.read_text().splitlines(); del lines[30:40]
+        p.write_text('\n'.join(lines)+'\n')
+        self.manifest['gyroscope_samples'] -= 10; self.save_manifest()
+        result = validator.validate(self.folder)
+        self.assertGreater(result['streams']['gyroscope']['gaps_over_1_5_observed_periods'], 0)
+    def test_schema3_incomplete_sidecars(self):
+        self.manifest.update(schema_version=3, completion_clean=True); self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'Missing or empty errors.csv'): validator.validate(self.folder)
+    def test_schema3_rejects_unclean_completion(self):
+        self.manifest.update(schema_version=3, completion_clean=False); self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'completion_clean'): validator.validate(self.folder)
+    def test_interruption_is_incomplete(self):
+        self.manifest['status'] = 'interrupted'; self.save_manifest()
+        with self.assertRaisesRegex(ValueError, 'Incomplete'): validator.validate(self.folder)
+    def upgrade_fixture_to_schema3(self):
+        self.manifest.update(schema_version=3, completion_clean=True); self.save_manifest()
+        for name in ['frames', 'accelerometer', 'gyroscope']:
+            p = self.folder / (name + '.csv')
+            with p.open() as f: rows = list(csv.DictReader(f))
+            for row in rows:
+                row['callback_host_s'] = row.get('host_s', row.get('timestamp_s'))
+            with p.open('w', newline='') as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+        for name in ['errors', 'intrinsics', 'telemetry']:
+            (self.folder / (name + '.csv')).write_text('header\n')
+    def test_schema3_complete_files(self):
+        self.upgrade_fixture_to_schema3()
+        self.assertEqual(validator.validate(self.folder)['streams']['video']['count'], 240)
+    def test_schema3_invalid_callback_time(self):
+        self.upgrade_fixture_to_schema3()
+        p = self.folder / 'accelerometer.csv'
+        with p.open() as f: rows = list(csv.DictReader(f))
+        rows[10]['callback_host_s'] = 'nan'
+        with p.open('w', newline='') as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
+        with self.assertRaisesRegex(ValueError, 'callback timestamp'): validator.validate(self.folder)
 
 if __name__ == '__main__': unittest.main()

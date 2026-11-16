@@ -169,7 +169,7 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
         let take = generation
         logs = [:]
         for (name, header) in [
-            ("frames", "index,pts_value,pts_timescale,host_s,video_s,callback_host_s"),
+            ("frames", "index,pts_value,pts_timescale,host_s,video_s,callback_host_s,pts_epoch,pts_flags"),
             ("accelerometer", "timestamp_s,ax_g,ay_g,az_g,callback_host_s"),
             ("gyroscope", "timestamp_s,gx_rad_s,gy_rad_s,gz_rad_s,callback_host_s"),
             ("drops", "pts_value,pts_timescale,callback_host_s,reason"),
@@ -196,6 +196,7 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
                 AVVideoExpectedSourceFrameRateKey: mode.fps, AVVideoAllowFrameReorderingKey: false]
         ])
         i.expectsMediaDataInRealTime = true
+        i.mediaTimeScale = 1_000_000_000
         guard w.canAdd(i) else { throw Failure("Cannot add writer input") }
         w.add(i)
         writer = w; input = i
@@ -223,7 +224,7 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
         metadata["motion_axis_convention"] = "Apple device axes: +x right, +y toward top, +z out of screen in portrait; right-hand angular velocity"
         metadata["motion_data_kind"] = "Separate Core Motion measurements, not unprocessed hardware ADC data"
         metadata["clock_mapping"] = "CMSyncConvertTime from session.masterClock to CMClockGetHostTimeClock; Core Motion timestamps are boot-relative seconds. Physical sensor latency/offset uncalibrated."
-        metadata["output_rotation_applied"] = false
+        metadata["explicit_output_rotation_requested"] = false
         metadata["device_orientation_at_start_raw"] = UIDevice.current.orientation.rawValue
         metadata["active_min_frame_duration_s"] = camera.activeVideoMinFrameDuration.seconds
         metadata["active_max_frame_duration_s"] = camera.activeVideoMaxFrameDuration.seconds
@@ -326,6 +327,9 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
         let host = CMSyncConvertTime(pts, from: clock, to: CMClockGetHostTimeClock()).seconds
         guard host.isFinite else { end(reason: "invalid clock conversion"); return }
         guard host >= startHost else { return } // Reject queued preview frames from before this take.
+        if let previous = videoStats.last, host <= previous {
+            end(reason: "nonmonotonic converted video timestamp"); return
+        }
         if let previous = lastPTS, CMTimeCompare(pts, previous) <= 0 {
             lastTimestampFailure = "invalid or nonmonotonic video PTS"
             end(reason: lastTimestampFailure!); return
@@ -341,12 +345,15 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
                 metadata["first_video_host_s"] = host
                 metadata["first_video_pts_value"] = pts.value
                 metadata["first_video_pts_timescale"] = pts.timescale
+                metadata["first_video_pts_epoch"] = pts.epoch
+                metadata["first_video_pts_flags"] = pts.flags.rawValue
                 metadata["stabilization_active_raw"] = connection.activeVideoStabilizationMode.rawValue
+                metadata["output_connection_orientation_raw"] = connection.videoOrientation.rawValue
                 try writeMetadata()
             }
             guard input.isReadyForMoreMediaData else { try drop(pts, "writer_backpressure"); return }
             guard input.append(sampleBuffer) else { throw writer.error ?? Failure("Frame append failed") }
-            try logs["frames"]?.row("\(frames),\(pts.value),\(pts.timescale),\(host),\(CMTimeSubtract(pts, origin!).seconds),\(Self.host)")
+            try logs["frames"]?.row("\(frames),\(pts.value),\(pts.timescale),\(host),\(CMTimeSubtract(pts, origin!).seconds),\(Self.host),\(pts.epoch),\(pts.flags.rawValue)")
             if let data = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix, attachmentModeOut: nil) as? Data {
                 try logs["intrinsics"]?.row("\(frames),\(data.base64EncodedString())")
             }
@@ -356,6 +363,9 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
     }
     func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard active else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if let clock = session.masterClock, pts.isNumeric,
+           CMSyncConvertTime(pts, from: clock, to: CMClockGetHostTimeClock()).seconds < startHost { return }
         let reason = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_DroppedFrameReason, attachmentModeOut: nil).map { String(describing: $0) } ?? "capture_drop"
         do { try drop(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), reason) }
         catch { end(reason: "drop log: \(error)") }
@@ -422,7 +432,7 @@ final class Recorder: NSObject, ObservableObject, AVCaptureVideoDataOutputSample
         metadata["completion_clean"] = success && !writeFailure && !logFailure
         var message = success && !writeFailure && !logFailure ? "Saved \(frames) frames. Stop: \(metadata["stop_reason"] ?? "")" : "Recording incomplete: \(error ?? reason)"
         if let errors = metadata["log_errors"] as? [String], !errors.isEmpty { message += " — CSV errors; see manifest" }
-        do { try writeMetadata() } catch { message += " — manifest write failed: \(error)" }
+        do { try writeMetadata() } catch { message = "Recording incomplete — manifest write failed: \(error)" }
         let folderName = folder?.lastPathComponent ?? ""
         DispatchQueue.main.async { self.lastFolderName = folderName }
         writer = nil; input = nil; finishing = false
@@ -496,8 +506,9 @@ private final class CSV {
         try handle.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true)
     }
     func close() throws {
-        defer { try? handle.close() }
-        try flush(); try handle.synchronize()
+        do { try flush(); try handle.synchronize() }
+        catch { try? handle.close(); throw error }
+        try handle.close()
     }
 }
 

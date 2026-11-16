@@ -2,37 +2,15 @@
 
 The recorder remains a native iPhone app. GitHub's hosted Mac compiles it automatically; you control the process from a Windows browser. A Windows signing tool then installs the compiled app on your iPhone. You do not need to borrow a Mac, use Xcode's interface, rent a remote desktop, or purchase a developer membership for the free-account sideloading route.
 
-This ZIP contains source and a cloud build workflow, NOT an already compiled IPA. The workflow has not been run on your behalf. Its first run is the actual iOS compilation check. Signing/installation and 240 fps recording still need verification on your phone.
+The repository now contains the actual source files. The original ZIP is retained as a backup; the build no longer extracts it. The output is an **unsigned IPA**. Windows signing and phone testing are separate steps.
 
-## What you need
+## Download the IPA
 
-- Windows PC, iPhone 13 Pro, USB cable, internet.
-- GitHub account for the cloud build.
-- Apple Account for personal signing through a Windows sideloading tool.
-- Sideloadly from https://sideloadly.io/ (or AltStore Classic as an alternative).
+Open the successful Actions run linked in the handoff. Under **Artifacts**, download **HighSpeedRecorder-iPhone-IPA** and extract the artifact ZIP. Use the inner **HighSpeedRecorder.ipa** in Sideloadly, not the ZIP. `SHA256.txt` contains its checksum. Artifacts are retained for seven days.
 
-GitHub's hosted macOS build uses your account's Actions allowance. Standard runners are free for public repositories; private repositories use included compute allowance and may incur charges beyond it. A private repository keeps your source private. The workflow does not request Apple credentials or use GitHub secrets.
+To rebuild later, open this repository's **Actions → Build iPhone IPA → Run workflow**, choose `codex/recorder-build-repair` (or `main` after merging), and click **Run workflow**. Wait for a green result before downloading. A queued macOS job is not a compiler failure. `ios-build-log` contains the compiler output.
 
-## Part 1 — create the IPA using your browser
-
-1. Create a GitHub account at https://github.com if needed.
-2. Click **New repository**. Name it `iphone-motion-recorder`. Choose Private if you prefer; initialize it with a README so it has a default branch.
-3. Keep the downloaded **HighSpeedRecorder_iPhone13Pro.zip** intact. In the repository choose **Add file → Upload files**, upload that ZIP to the repository root, and commit it. Do NOT upload it inside a folder or change its filename.
-4. Extract a second copy of the ZIP locally on Windows. Inside the extracted HighSpeedRecorder folder, open **BUILD_ON_GITHUB.yml** using Notepad. Select all and copy its contents.
-5. Back in the GitHub repository choose **Add file → Create new file**. Enter this exact filename:
-
-   `.github/workflows/build.yml`
-
-6. Paste the copied YAML contents and commit. You have now supplied the two required items: the project ZIP and the workflow file.
-7. Click the repository's **Actions** tab. Enable workflows if GitHub asks. Select **Build iPhone IPA → Run workflow → Run workflow** on the default branch.
-8. Wait for the run to finish. It extracts the ZIP, tests the data validator, compiles the iPhone app on GitHub's Mac, checks the executable platform/architecture, and packages an unsigned IPA.
-9. Open the completed run. Under **Artifacts**, download **HighSpeedRecorder-iPhone-IPA**. Extract that downloaded artifact ZIP. Inside you will find:
-   - `HighSpeedRecorder.ipa`
-   - `SHA256.txt`
-
-The IPA is the file you install in Part 2. Do not give Sideloadly the source ZIP or the outer GitHub artifact ZIP.
-
-If the run is red, open the failed step and copy the FIRST compiler error, or download `ios-build-log`. No usable IPA is claimed until the cloud build succeeds. The workflow accepts a directly uploaded source tree too, but the ZIP route above avoids hidden-folder/upload problems on Windows.
+The workflow builds for physical iPhoneOS, checks the arm64 executable, and packages the app without Apple credentials. Standard GitHub-hosted runners in public repositories have free compute usage. Private repositories consume plan allowances and can incur charges beyond them; larger runners are billed even in public repositories. Artifact storage has separate plan allowances. This workflow selects a standard runner, keeps artifacts for seven days, and does not purchase services. See the current [GitHub billing documentation](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions).
 
 ## Part 2 — sign and install from Windows
 
@@ -81,8 +59,8 @@ The recorder and validator do not reconstruct motion or correct sensor drift.
 
 ## Troubleshooting
 
-- **Actions workflow absent:** create `.github/workflows/build.yml` on the default branch using the contents of BUILD_ON_GITHUB.yml.
-- **Project ZIP not found:** upload the unchanged source ZIP to the repository root under the exact name HighSpeedRecorder_iPhone13Pro.zip.
+- **Actions workflow absent:** select the repair branch; merge the pull request to make tracked-source builds available on main.
+- **Source missing:** use a complete checkout of the repair branch; this workflow builds tracked source and does not extract the archive.
 - **Cloud compile fails:** inspect the first compiler error in Build unsigned physical-iPhone app. The log artifact is retained when possible.
 - **Sideloadly cannot see iPhone:** verify USB trust and follow its official device-driver troubleshooting. Use an actual data cable.
 - **App will not open after a week:** refresh its signature; no source rebuild is normally necessary.
@@ -97,3 +75,13 @@ The recorder and validator do not reconstruct motion or correct sensor drift.
 - Sideloadly account, refresh, and Windows FAQ: https://sideloadly.io/faq
 - AltStore Windows setup: https://faq.altstore.io/altstore-classic/how-to-install-altstore-windows
 - AltStore refresh limits: https://faq.altstore.io/altstore-classic/your-altstore
+
+## First-recording acceptance check
+
+1. Run the 10-second check after preview focus/exposure settle. Note requested mode, measured video fps, accelerometer Hz, gyroscope Hz, and logged drops. A 1000 Hz request is not a promise of delivery.
+2. Wait for Saved. Export the whole folder. Check `manifest.json`: status `finalized`, `completion_clean: true`, no sidecar errors, and the expected stop reason. Completeness does not imply zero timestamp gaps or physical synchronization accuracy.
+3. Play `video.mov` on Windows. Check duration is about ten real seconds, orientation, visibility of markers, and image sharpness.
+4. Run the Python validator, preferably with `--decode-video`. Send its JSON report and the manifest (no credentials). These checks detect ordering/count/gap problems; they do not calibrate camera–IMU latency.
+5. Repeat a manual Start/Stop take, then test a longer take while watching temperature and drops. Keep the app foregrounded. Backgrounding/interruption stops acquisition; an interrupted container can still contain useful partial data, but its dataset is marked incomplete.
+
+Official Windows and signing guidance checked on 2026-11-16: [Sideloadly](https://sideloadly.io/) and its [FAQ](https://sideloadly.io/faq). Free-account app signatures expire after seven days and must be refreshed. Enable the local auto-refresh daemon if desired; the Windows computer must be able to reach the phone. Enter Apple credentials only into the local signing tool. No paid developer membership is required for this route. Back up recordings before reinstalling, and keep the same bundle ID/account for updates.
