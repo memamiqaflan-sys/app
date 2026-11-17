@@ -19,8 +19,18 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+      - name: Restore app signing identity
+        env:
+          KEYSTORE_B64: ${{ secrets.POCO_TEST_KEYSTORE_B64 }}
+        run: |
+          test -n "$KEYSTORE_B64"
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/poco-recorder.jks"
+          chmod 600 "$RUNNER_TEMP/poco-recorder.jks"
       - name: Build, test and lint Android app
         working-directory: android
+        env:
+          POCO_SIGNING_STORE: ${{ runner.temp }}/poco-recorder.jks
+          POCO_SIGNING_PASSWORD: ${{ secrets.POCO_TEST_KEYSTORE_PASSWORD }}
         run: |
           set -o pipefail
           chmod +x gradlew

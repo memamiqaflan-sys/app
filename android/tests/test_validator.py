@@ -14,7 +14,7 @@ class ValidatorTests(unittest.TestCase):
         (self.folder/'frames.csv').write_text('index,encoded_pts_us,mux_pts_us,callback_elapsed_ns,bytes,flags\n0,1000000,0,1000000000,100,1\n1,1008333,8333,1008333000,100,0\n2,1016666,16666,1016666000,100,0\n')
         for name,units in [('accelerometer','x_m_s2,y_m_s2,z_m_s2'),('gyroscope','x_rad_s,y_rad_s,z_rad_s')]:
             (self.folder/(name+'.csv')).write_text('timestamp_ns,'+units+',callback_elapsed_ns\n1000000000,0,0,1,1000000001\n1005000000,0,0,1,1005000001\n1010000000,0,0,1,1010000001\n')
-        for name in ['capture_results','events','intrinsics']:(self.folder/(name+'.csv')).write_text('header\n')
+        for name in ['capture_results','events','intrinsics','telemetry']:(self.folder/(name+'.csv')).write_text('header\n')
         self.m=dict(schema='poco-recorder-1',status='finalized',completion_clean=True,errors=[],
                     first_encoded_pts_us=1000000,fps_requested=120,width=1920,height=1080,
                     camera_timestamp_source=1,stop_reason='user stopped',video=dict(count=3,measured_hz=2e6/16666),

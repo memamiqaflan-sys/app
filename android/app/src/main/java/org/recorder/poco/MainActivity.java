@@ -17,12 +17,14 @@ public final class MainActivity extends Activity implements Recorder.UI {
     private Recorder recorder;
     private TextureView preview;
     private TextView status;
-    private Spinner modes;
+    private Spinner modes,takes;
     private CheckBox lock;
     private Button prepare,start,stop,check,export,capabilities;
     private List<Recorder.Mode> options=new ArrayList<>();
     private File latest,report,pendingExport;
-    private boolean exportZip,dead;
+    private boolean exportZip,dead,exporting;
+    private List<File> takeFolders=new ArrayList<>();
+    private Lifecycle.State displayedState=Lifecycle.State.IDLE;
     private final java.util.concurrent.ExecutorService exportThread=Executors.newSingleThreadExecutor();
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
@@ -39,11 +41,18 @@ public final class MainActivity extends Activity implements Recorder.UI {
         start=button(controls,"Start — manual stop",v->start(0));
         check=button(controls,"10-second recording check",v->start(10));
         stop=button(controls,"Stop and save",v->recorder.stop());
-        export=button(controls,"Export latest take ZIP",v->export(false));
+        takes=new Spinner(this);controls.addView(takes);
+        takes.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
+            public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){if(pos>=0&&pos<takeFolders.size())latest=takeFolders.get(pos);}
+            public void onNothingSelected(android.widget.AdapterView<?> p){}
+        });
+        export=button(controls,"Export selected take ZIP",v->export(false));
         capabilities=button(controls,"Export camera / sensor report",v->export(true));
         TextView footer=new TextView(this);footer.setText("Export the entire ZIP to Downloads or your cloud drive, then copy to Windows. No microphone, account, network connection or paid service required.");footer.setTextColor(0xffaabbcc);footer.setTextSize(12);controls.addView(footer);
         root.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(16+insets.getSystemWindowInsetLeft(),12+insets.getSystemWindowInsetTop(),16+insets.getSystemWindowInsetRight(),12+insets.getSystemWindowInsetBottom());return insets;});
         setContentView(root);recorder=new Recorder(this,this);status(Lifecycle.State.IDLE,"Allow camera access, then choose a mode.");
+        recorder.listTakes();
+        if(state!=null&&state.containsKey("pending_export")){pendingExport=new File(state.getString("pending_export"));exportZip=state.getBoolean("export_zip");}
         preview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener(){
             public void onSurfaceTextureAvailable(SurfaceTexture texture,int w,int h){transform();}
             public void onSurfaceTextureSizeChanged(SurfaceTexture texture,int w,int h){transform();}
@@ -51,7 +60,10 @@ public final class MainActivity extends Activity implements Recorder.UI {
             public void onSurfaceTextureUpdated(SurfaceTexture texture){}
         });
         modes.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
-            public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){transform();}
+            public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){
+                if(displayedState==Lifecycle.State.READY){start.setEnabled(false);check.setEnabled(false);recorder.invalidatePreview();}
+                transform();
+            }
             public void onNothingSelected(android.widget.AdapterView<?> p){}
         });
         if(checkSelfPermission(Manifest.permission.CAMERA)==PackageManager.PERMISSION_GRANTED)recorder.discover();
@@ -80,19 +92,29 @@ public final class MainActivity extends Activity implements Recorder.UI {
         preview.setTransform(matrix);
     }
     @Override public void status(Lifecycle.State state,String text){runOnUiThread(()->{
-        if(dead)return;status.setText(state+"\n"+text);
-        boolean busy=state==Lifecycle.State.RECORDING||state==Lifecycle.State.FINALIZING||state==Lifecycle.State.PREPARING;
+        if(dead)return;displayedState=state;status.setText(state+"\n"+text);
+        updateControls();
+    });}
+    private void updateControls(){
+        Lifecycle.State state=displayedState;
+        boolean busy=exporting||state==Lifecycle.State.RECORDING||state==Lifecycle.State.FINALIZING||state==Lifecycle.State.PREPARING;
         modes.setEnabled(!busy);lock.setEnabled(!busy);prepare.setEnabled(!busy&&!options.isEmpty());
-        start.setEnabled(state==Lifecycle.State.READY);check.setEnabled(state==Lifecycle.State.READY);stop.setEnabled(state==Lifecycle.State.RECORDING);
+        start.setEnabled(!exporting&&state==Lifecycle.State.READY);check.setEnabled(!exporting&&state==Lifecycle.State.READY);stop.setEnabled(state==Lifecycle.State.RECORDING);
+        takes.setEnabled(!busy&&!takeFolders.isEmpty());
         export.setEnabled(!busy&&latest!=null);capabilities.setEnabled(!busy&&report!=null);
         if(busy||state==Lifecycle.State.READY)getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-    });}
+    }
     @Override public void modes(List<Recorder.Mode> found,String camera){runOnUiThread(()->{
         if(dead)return;options=new ArrayList<>(found);modes.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,options));
         prepare.setEnabled(!options.isEmpty());status.setText(camera+"\n"+(options.isEmpty()?"No target mode exposed. Export report.":"Choose a mode and Prepare preview."));transform();
     });}
-    @Override public void dataset(File folder){runOnUiThread(()->{latest=folder;export.setEnabled(true);});}
+    @Override public void dataset(File folder){recorder.listTakes();}
+    @Override public void datasets(List<File> folders){runOnUiThread(()->{
+        if(dead)return;takeFolders=new ArrayList<>(folders);List<String> names=new ArrayList<>();
+        for(File f:folders)names.add(f.getName());latest=folders.isEmpty()?null:folders.get(0);
+        takes.setAdapter(new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,names));updateControls();
+    });}
     @Override public void report(File file){runOnUiThread(()->{report=file;capabilities.setEnabled(true);});}
     @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] results){super.onRequestPermissionsResult(code,permissions,results);
         if(code==1&&results.length>0&&results[0]==PackageManager.PERMISSION_GRANTED)recorder.discover();
@@ -106,6 +128,8 @@ public final class MainActivity extends Activity implements Recorder.UI {
     @Override public void onActivityResult(int request,int result,Intent data){super.onActivityResult(request,result,data);
         if(request!=2||result!=RESULT_OK||data==null||data.getData()==null)return;
         File source=pendingExport;boolean zip=exportZip;android.net.Uri destination=data.getData();
+        if(source==null){Toast.makeText(this,"Choose the saved take and export again.",Toast.LENGTH_LONG).show();return;}
+        exporting=true;status.setText("Exporting… keep app open until the confirmation.");updateControls();
         exportThread.execute(()->{
             try(OutputStream stream=getContentResolver().openOutputStream(destination,"wt")){
                 if(stream==null)throw new IOException("Cannot open destination");
@@ -113,11 +137,12 @@ public final class MainActivity extends Activity implements Recorder.UI {
                     File[] files=source.listFiles();if(files==null)throw new IOException("Missing dataset");
                     for(File file:files){if(!file.isFile())continue;archive.putNextEntry(new ZipEntry(source.getName()+"/"+file.getName()));copy(file,archive);archive.closeEntry();}
                 }}else copy(source,stream);
-                runOnUiThread(()->Toast.makeText(this,"Export saved. Check the destination file.",Toast.LENGTH_LONG).show());
-            }catch(Exception e){runOnUiThread(()->Toast.makeText(this,"Export failed: "+e.getMessage()+". Delete any partial export and retry.",Toast.LENGTH_LONG).show());}
+                runOnUiThread(()->{exporting=false;updateControls();status.setText("Export saved. Check the destination file.");Toast.makeText(this,"Export saved",Toast.LENGTH_LONG).show();});
+            }catch(Exception e){runOnUiThread(()->{exporting=false;updateControls();status.setText("Export failed: "+e.getMessage()+". Delete any partial export and retry.");});}
         });
     }
     private static void copy(File file,OutputStream out)throws IOException{try(InputStream in=new FileInputStream(file)){byte[] buffer=new byte[65536];int n;while((n=in.read(buffer))!=-1)out.write(buffer,0,n);}}
+    @Override protected void onSaveInstanceState(Bundle state){super.onSaveInstanceState(state);if(pendingExport!=null){state.putString("pending_export",pendingExport.getPath());state.putBoolean("export_zip",exportZip);}}
     @Override protected void onResume(){super.onResume();if(recorder!=null)recorder.resume();}
     @Override protected void onPause(){if(recorder!=null)recorder.pause();super.onPause();}
     @Override protected void onDestroy(){dead=true;exportThread.shutdown();if(recorder!=null)recorder.destroy();super.onDestroy();}

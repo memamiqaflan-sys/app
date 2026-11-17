@@ -50,7 +50,7 @@ def validate(folder, decode=False):
     if m.get('status') != 'finalized' or m.get('completion_clean') is not True or m.get('errors'):
         raise ValueError(f'Incomplete dataset: {m.get("status")}, {m.get("errors")}')
     for name in ['video.mp4', 'frames.csv', 'accelerometer.csv', 'gyroscope.csv',
-                 'capture_results.csv', 'events.csv', 'intrinsics.csv']:
+                 'capture_results.csv', 'events.csv', 'intrinsics.csv', 'telemetry.csv']:
         if not (folder/name).is_file() or not (folder/name).stat().st_size:
             raise ValueError(f'Missing or empty {name}')
     streams = {

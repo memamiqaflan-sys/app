@@ -27,6 +27,7 @@ final class Recorder {
         void status(Lifecycle.State state, String text);
         void modes(List<Mode> modes, String camera);
         void dataset(File folder);
+        void datasets(List<File> folders);
         void report(File report);
     }
     static final class Mode {
@@ -45,6 +46,7 @@ final class Recorder {
     private SensorEventListener sensorListener;
     private Mode mode; private JSONObject manifest;
     private final Map<String,BufferedWriter> logs=new LinkedHashMap<>();
+    private final Map<String,FileOutputStream> logFiles=new LinkedHashMap<>();
     private File folder; private int track=-1; private boolean muxStarted, firstKey, eosSeen, terminalFailure;
     private boolean foreground=true; private long firstPts=-1, startNs, stopNs, limitNs, lastVideoArrival,lastAccelArrival,lastGyroArrival;
     private String stopReason="", codecName="", mime=""; private long captureFailures;
@@ -60,6 +62,11 @@ final class Recorder {
     }
     private void show(String text) { ui.status(life.state,text); }
     private File root() { File r=context.getExternalFilesDir(null);return r==null?context.getFilesDir():r; }
+    void listTakes(){q.post(()->{
+        File[] found=root().listFiles(f->f.isDirectory()&&f.getName().startsWith("Recording-"));
+        List<File> result=new ArrayList<>();if(found!=null)result.addAll(Arrays.asList(found));
+        result.sort(Comparator.comparingLong(File::lastModified).reversed());ui.datasets(result);
+    });}
     void discover() { q.post(()->{try { discoverImpl(); } catch(Exception e){fail(e);} }); }
     private void discoverImpl() throws Exception {
         List<Mode> choices=new ArrayList<>(); JSONArray all=new JSONArray(); long largest=-1;
@@ -114,6 +121,9 @@ final class Recorder {
     }
     private static boolean has(int[] values,int key) { if(values!=null)for(int v:values)if(v==key)return true;return false; }
     void resume() { q.post(()->foreground=true); }
+    void invalidatePreview(){q.post(()->{
+        if(life.state==Lifecycle.State.READY){life.cancel();closeCameraCodec();show("Mode changed. Prepare preview before recording.");}
+    });}
     void destroy() { pause();q.postDelayed(()->{closeCameraCodec();sensorThread.quitSafely();thread.quitSafely();},8000); }
     void pause() { q.post(()->{
         foreground=false;
@@ -123,7 +133,7 @@ final class Recorder {
     void prepare(Mode chosen,SurfaceTexture texture) { q.post(()->{
         try {
             if(!foreground)return;
-            long token=life.prepare();closeCameraCodec();mode=chosen;show("Preparing "+mode+"…");
+            long token=life.prepare();closeCameraCodec();observedFocus=null;mode=chosen;show("Preparing "+mode+"…");
             texture.setDefaultBufferSize(mode.width,mode.height);previewSurface=new Surface(texture);
             configureCodec(token);encoderSurface=codec.createInputSurface();codec.start();
             if(context.checkSelfPermission(Manifest.permission.CAMERA)!=PackageManager.PERMISSION_GRANTED) throw new IOException("Camera permission required");
@@ -155,6 +165,7 @@ final class Recorder {
             public void onInputBufferAvailable(MediaCodec c,int index){}
             public void onOutputFormatChanged(MediaCodec c,MediaFormat f){
                 if(token!=life.token)return;
+                if(f.getInteger(MediaFormat.KEY_WIDTH)!=mode.width||f.getInteger(MediaFormat.KEY_HEIGHT)!=mode.height){fail(new IOException("Encoder changed dimensions; capture stopped"));}
                 // Format is also obtained at Start; preview can be drained before recording.
             }
             public void onError(MediaCodec c,MediaCodec.CodecException e){if(token==life.token)fail(e);}
@@ -219,7 +230,7 @@ final class Recorder {
                 row("capture_results",result.getFrameNumber()+","+value(ts)+","+now()+","+value(result.get(CaptureResult.SENSOR_EXPOSURE_TIME))+","+
                     value(result.get(CaptureResult.SENSOR_SENSITIVITY))+","+value(result.get(CaptureResult.LENS_FOCUS_DISTANCE))+","+
                     value(result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE))+","+value(result.get(CaptureResult.LENS_OPTICAL_STABILIZATION_MODE))+","+
-                    value(result.get(CaptureResult.CONTROL_AF_STATE))+","+value(result.get(CaptureResult.CONTROL_AE_LOCK))+","+value(result.get(CaptureResult.CONTROL_AWB_LOCK)));
+                    value(result.get(CaptureResult.CONTROL_AF_STATE))+","+value(result.get(CaptureResult.CONTROL_AE_LOCK))+","+value(result.get(CaptureResult.CONTROL_AWB_LOCK))+","+value(result.get(CaptureResult.CONTROL_AF_MODE)));
                 float[] k=result.get(CaptureResult.LENS_INTRINSIC_CALIBRATION);
                 if(k!=null)row("intrinsics",result.getFrameNumber()+","+value(ts)+","+Arrays.toString(k).replace(',',';'));
             }catch(Exception e){fail(e);}
@@ -237,14 +248,17 @@ final class Recorder {
             int rotationDegrees=((sensorOrientation==null?90:sensorOrientation)-displayRotationDegrees+360)%360;
             if(root().getUsableSpace()<1_000_000_000L)throw new IOException("Keep at least 1 GB free to start");
             folder=new File(root(),"Recording-"+UUID.randomUUID());if(!folder.mkdirs())throw new IOException("Cannot create take folder");
+            manifest=new JSONObject().put("schema","poco-recorder-1").put("status","starting").put("completion_clean",false);
+            writeManifest();
             errors.clear();terminalFailure=false;eosSeen=false;firstKey=false;muxStarted=false;firstPts=-1;track=-1;captureFailures=0;
             video=new TimingStats();accel=new TimingStats();gyro=new TimingStats();stopReason="";stopNs=0;
             startNs=now();lastVideoArrival=lastAccelArrival=lastGyroArrival=startNs;limitNs=seconds>0?seconds*1_000_000_000L:0;
             open("frames","index,encoded_pts_us,mux_pts_us,callback_elapsed_ns,bytes,flags");
             open("accelerometer","timestamp_ns,x_m_s2,y_m_s2,z_m_s2,callback_elapsed_ns,bias_x,bias_y,bias_z");
             open("gyroscope","timestamp_ns,x_rad_s,y_rad_s,z_rad_s,callback_elapsed_ns,bias_x,bias_y,bias_z");
-            open("capture_results","camera_frame_number,sensor_timestamp_ns,callback_elapsed_ns,exposure_ns,iso,focus_diopters,video_stabilization,ois,af_state,ae_lock,awb_lock");
+            open("capture_results","camera_frame_number,sensor_timestamp_ns,callback_elapsed_ns,exposure_ns,iso,focus_diopters,video_stabilization,ois,af_state,ae_lock,awb_lock,af_mode");
             open("intrinsics","camera_frame_number,sensor_timestamp_ns,fx_fy_cx_cy_skew");open("events","elapsed_ns,event");
+            open("telemetry","elapsed_ns,thermal_status");
             manifest=new JSONObject().put("schema","poco-recorder-1").put("status","recording").put("completion_clean",false)
                 .put("created_utc",java.time.Instant.now().toString()).put("model",Build.MODEL).put("android",Build.VERSION.RELEASE)
                 .put("camera_id",cameraId).put("width",mode.width).put("height",mode.height).put("fps_requested",mode.fps)
@@ -262,8 +276,12 @@ final class Recorder {
                 .put("camera_lock_requested",lock).put("video_stabilization_requested","off").put("optical_stabilization_requested","off if supported; internal processing not certified disabled")
                 .put("mp4_rotation_degrees",rotationDegrees).put("sensor_orientation_degrees",characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION))
                 .put("physical_synchronization_accuracy","unvalidated").put("pending_sensor_capacity",512);
+            MediaFormat actual=codec.getOutputFormat();
+            if(actual.getInteger(MediaFormat.KEY_WIDTH)!=mode.width||actual.getInteger(MediaFormat.KEY_HEIGHT)!=mode.height)throw new IOException("Encoder format differs from request");
+            manifest.put("encoder_output_format",actual.toString());
+            manifest.put("encoder_pts_contract","Direct Camera2 to encoder Surface: expected source PTS is camera sensor timestamp quantized to microseconds. Verify against capture_results; retain original PTS. REALTIME camera source maps ns directly to elapsedRealtimeNanos; UNKNOWN source has no guaranteed clock mapping.");
             writeManifest();muxer=new MediaMuxer(new File(folder,"video.mp4").getPath(),MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-            muxer.setOrientationHint(rotationDegrees);track=muxer.addTrack(codec.getOutputFormat());muxer.start();muxStarted=true;
+            muxer.setOrientationHint(rotationDegrees);track=muxer.addTrack(actual);muxer.start();muxStarted=true;
             if(!life.start())throw new IOException("Start state changed");
             setRequest(lock,life.token);registerSensors(life.token);
             Bundle params=new Bundle();params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME,0);codec.setParameters(params);
@@ -326,6 +344,7 @@ final class Recorder {
             for(BufferedWriter w:logs.values())w.flush();long n=now();
             if(folder.getUsableSpace()<500_000_000L){stopImpl("low storage");return;}
             PowerManager power=(PowerManager)context.getSystemService(Context.POWER_SERVICE);int thermal=power.getCurrentThermalStatus();
+            row("telemetry",n+","+thermal);
             if(thermal>=PowerManager.THERMAL_STATUS_CRITICAL){stopImpl("critical thermal pressure");return;}
             if(n-startNs>5_000_000_000L && (n-lastVideoArrival>3_000_000_000L||n-lastAccelArrival>3_000_000_000L||n-lastGyroArrival>3_000_000_000L)){
                 stopImpl("camera or IMU stream stalled");return;
@@ -349,8 +368,9 @@ final class Recorder {
         if(life.state==Lifecycle.State.RECORDING){terminalFailure=true;errors.add(e.toString());event("error: "+e);stopImpl("failure: "+e);}
         else if(life.state==Lifecycle.State.FINALIZING){terminalFailure=true;errors.add(e.toString());}
         else {
-            if(folder!=null&&manifest!=null&&"recording".equals(manifest.optString("status"))){
+            if(folder!=null&&manifest!=null&&("recording".equals(manifest.optString("status"))||"starting".equals(manifest.optString("status")))){
                 try{manifest.put("status","failed_start").put("error",e.toString());writeManifest();}catch(Exception ignored){}
+                ui.dataset(folder);
             }
             if(muxer!=null){try{if(muxStarted)muxer.stop();}catch(Exception ignored){}try{muxer.release();}catch(Exception ignored){}muxer=null;muxStarted=false;}
             closeLogs();closeCameraCodec();life.token++;life.state=Lifecycle.State.FAILED;show("Failed: "+e.getMessage()+". Choose mode / Prepare again.");
@@ -360,6 +380,7 @@ final class Recorder {
         if(token!=life.token||life.state!=Lifecycle.State.FINALIZING)return;
         boolean containerOk=false;
         if(muxer!=null){try{if(muxStarted){muxer.stop();containerOk=true;}}catch(Exception e){errors.add("MP4 finalize: "+e);}finally{try{muxer.release();}catch(Exception e){errors.add("MP4 release: "+e);}muxer=null;muxStarted=false;}}
+        if(containerOk){try(FileOutputStream file=new FileOutputStream(new File(folder,"video.mp4"),true)){file.getFD().sync();}catch(Exception e){errors.add("MP4 sync: "+e);}}
         closeLogs();life.token++;closeCameraCodec();
         boolean normal=stopReason.equals("user stopped")||stopReason.equals("duration reached");
         boolean clean=normal&&containerOk&&eosSeen&&!terminalFailure&&errors.isEmpty()&&video.count>=2&&accel.count>=2&&gyro.count>=2;
@@ -375,10 +396,18 @@ final class Recorder {
         ui.dataset(folder);show((clean?"Saved":"Incomplete / interrupted")+" · "+folder.getName()+String.format(Locale.US,"\nVideo %.1f fps · accel %.1f Hz · gyro %.1f Hz\n",video.hz(),accel.hz(),gyro.hz())+stopReason+(errors.isEmpty()?"":"\n"+errors.get(0))+"\nPrepare preview for another take. Export the whole ZIP.");
     }
     private static JSONObject statsJson(TimingStats s) throws JSONException{return new JSONObject().put("count",s.count).put("first_ns",s.first).put("last_ns",s.last).put("measured_hz",s.hz()).put("max_gap_ns",s.maxGap).put("invalid_timestamps",s.invalid);}
-    private void open(String name,String header)throws IOException{BufferedWriter w=new BufferedWriter(new OutputStreamWriter(new FileOutputStream(new File(folder,name+".csv")),StandardCharsets.UTF_8),32768);logs.put(name,w);w.write(header);w.newLine();}
+    private void open(String name,String header)throws IOException{
+        FileOutputStream file=new FileOutputStream(new File(folder,name+".csv"));logFiles.put(name,file);
+        BufferedWriter w=new BufferedWriter(new OutputStreamWriter(file,StandardCharsets.UTF_8),32768);logs.put(name,w);w.write(header);w.newLine();
+    }
     private void row(String name,String text)throws IOException{BufferedWriter w=logs.get(name);if(w==null)throw new IOException("Missing "+name+" writer");w.write(text);w.newLine();}
     private void event(String message){try{if(logs.containsKey("events"))row("events",now()+","+message.replace(',',';').replace('\n',' '));}catch(Exception e){errors.add("Event log: "+e);terminalFailure=true;}}
-    private void closeLogs(){for(Map.Entry<String,BufferedWriter> e:logs.entrySet())try{e.getValue().close();}catch(Exception ex){errors.add(e.getKey()+": "+ex);}logs.clear();}
+    private void closeLogs(){
+        for(Map.Entry<String,BufferedWriter> e:logs.entrySet()){
+            try{e.getValue().flush();logFiles.get(e.getKey()).getFD().sync();}catch(Exception ex){errors.add(e.getKey()+" flush/sync: "+ex);}
+            finally{try{e.getValue().close();}catch(Exception ex){errors.add(e.getKey()+" close: "+ex);}}
+        }logs.clear();logFiles.clear();
+    }
     private void writeManifest()throws Exception{atomicJson(new File(folder,"manifest.json"),manifest);}
     private static void atomicJson(File target,JSONObject data)throws Exception{
         File temp=new File(target.getParentFile(),target.getName()+".tmp");
