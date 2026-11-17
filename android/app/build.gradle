@@ -1,0 +1,27 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'org.recorder.poco'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'org.recorder.poco'
+        minSdk 29
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    testOptions { unitTests.returnDefaultValues = true }
+    if (System.getenv('POCO_SIGNING_STORE')) {
+        signingConfigs {
+            research {
+                storeType 'PKCS12'
+                storeFile file(System.getenv('POCO_SIGNING_STORE'))
+                storePassword System.getenv('POCO_SIGNING_PASSWORD')
+                keyAlias 'poco-recorder'
+                keyPassword System.getenv('POCO_SIGNING_PASSWORD')
+            }
+        }
+        buildTypes { debug { signingConfig signingConfigs.research; debuggable false } }
+    }
+}
+dependencies { testImplementation 'junit:junit:4.13.2' }
