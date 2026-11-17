@@ -5,3 +5,10 @@ xcuserdata/
 __pycache__/
 *.pyc
 .DS_Store
+android/.gradle/
+android/local.properties
+android/PocoRecorder.apk
+android/SHA256.txt
+android/build.log
+*.jks
+*.keystore
